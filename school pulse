@@ -1,0 +1,905 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+import io
+from datetime import datetime
+
+# ---------------- PAGE SETUP ----------------
+st.set_page_config(
+    page_title="School Pulse 2.0",
+    page_icon="🏫",
+    layout="centered"
+)
+
+st.markdown("""
+<style>
+.stApp {
+    background: linear-gradient(135deg, #eaf4ff 0%, #ffffff 50%, #eafff3 100%);
+}
+.main-title {
+    text-align: center;
+    font-size: 44px;
+    font-weight: 900;
+    color: #0b4f6c;
+}
+.sub-title {
+    text-align: center;
+    font-size: 18px;
+    color: #456;
+}
+.motivation {
+    text-align: center;
+    font-size: 20px;
+    font-weight: 700;
+    color: #14653f;
+    background: #e8fff2;
+    padding: 12px;
+    border-radius: 12px;
+}
+.rank-me {
+    font-weight: 900;
+    font-size: 18px;
+    color: #0b4f6c;
+}
+.notification {
+    background: #fff7d6;
+    border-left: 5px solid #f0b429;
+    padding: 10px;
+    border-radius: 8px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- DATABASE ----------------
+DB_NAME = "school_pulse.db"
+
+
+def get_connection():
+    return sqlite3.connect(DB_NAME)
+
+
+def create_tables():
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher TEXT NOT NULL,
+            student TEXT NOT NULL,
+            class_name TEXT,
+            problem TEXT NOT NULL,
+            help_given TEXT NOT NULL,
+            photo BLOB,
+            status TEXT DEFAULT 'Pending',
+            feedback TEXT DEFAULT '',
+            warning TEXT DEFAULT '',
+            coin_change INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS teacher_coins (
+            teacher TEXT PRIMARY KEY,
+            coins INTEGER DEFAULT 0
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT,
+            is_read INTEGER DEFAULT 0
+        )
+    """)
+
+    for teacher in teachers:
+        cursor.execute(
+            "INSERT OR IGNORE INTO teacher_coins (teacher, coins) VALUES (?, ?)",
+            (teacher, 0)
+        )
+
+    connection.commit()
+    connection.close()
+
+
+# ---------------- TEACHERS AND PASSWORDS ----------------
+teachers = [
+    "sreevani", "umarani", "poojitha", "kanaka durga", "murugun",
+    "pavani", "sai ram", "satya rao", "bagya lakshmi", "kalyani",
+    "abin", "anoienter", "naga jyothi", "sudheshna", "srujana",
+    "ravi kumar", "ruma", "sneha", "allen", "sravan",
+    "b lakshmi", "sridevi", "aruna", "sirisha", "gokul",
+    "imna", "L jyothi", "payal", "varsha", "anuja",
+    "Bv lakshmi", "ravi", "renuka", "koteswararao", "gopi chand",
+    "tirumaleswara rao", "shiva", "bhanu"
+]
+
+teacher_passwords = {}
+
+for index, teacher in enumerate(teachers):
+    teacher_passwords[teacher] = f"t{1000 + (index + 1) * 100 + 98}"
+
+director_password = "director@123098"
+
+admins = {
+    "Neela madam": "a1d2m3i4n5",
+    "Usha madam": "a2d3m4i5n6",
+    "Jyotishree madam": "a3d4m5i6n7"
+}
+
+create_tables()
+
+# ---------------- LOGIN STATE ----------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = None
+
+if "role" not in st.session_state:
+    st.session_state.role = None
+
+
+# ---------------- DATABASE FUNCTIONS ----------------
+def add_submission(teacher, student, class_name, problem, help_given, photo_bytes):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        INSERT INTO submissions
+        (teacher, student, class_name, problem, help_given, photo, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        teacher,
+        student,
+        class_name,
+        problem,
+        help_given,
+        photo_bytes,
+        datetime.now().strftime("%d-%m-%Y %I:%M %p")
+    ))
+
+    connection.commit()
+    connection.close()
+
+
+def get_teacher_submissions(teacher):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT id, student, class_name, problem, help_given, photo,
+               status, feedback, warning, coin_change, created_at
+        FROM submissions
+        WHERE teacher = ?
+        ORDER BY id DESC
+    """, (teacher,))
+
+    submissions = cursor.fetchall()
+    connection.close()
+
+    return submissions
+
+
+def get_pending_submissions():
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT id, teacher, student, class_name, problem, help_given,
+               photo, created_at
+        FROM submissions
+        WHERE status = 'Pending'
+        ORDER BY id DESC
+    """)
+
+    submissions = cursor.fetchall()
+    connection.close()
+
+    return submissions
+
+
+def get_submission_by_id(submission_id):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT id, teacher, student, class_name, problem, help_given,
+               photo, status, feedback, warning, created_at
+        FROM submissions
+        WHERE id = ?
+    """, (submission_id,))
+
+    submission = cursor.fetchone()
+    connection.close()
+
+    return submission
+
+
+def update_submission(
+    submission_id,
+    status,
+    feedback,
+    warning,
+    coin_change
+):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        UPDATE submissions
+        SET status = ?, feedback = ?, warning = ?, coin_change = ?
+        WHERE id = ?
+    """, (status, feedback, warning, coin_change, submission_id))
+
+    connection.commit()
+    connection.close()
+
+
+def change_coins(teacher, amount):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        UPDATE teacher_coins
+        SET coins = coins + ?
+        WHERE teacher = ?
+    """, (amount, teacher))
+
+    connection.commit()
+    connection.close()
+
+
+def get_teacher_coins(teacher):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT coins FROM teacher_coins
+        WHERE teacher = ?
+    """, (teacher,))
+
+    result = cursor.fetchone()
+    connection.close()
+
+    if result:
+        return result[0]
+
+    return 0
+
+
+def get_leaderboard():
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT teacher, coins
+        FROM teacher_coins
+        ORDER BY coins DESC, teacher ASC
+    """)
+
+    rows = cursor.fetchall()
+    connection.close()
+
+    ranking_data = []
+
+    for row in rows:
+        ranking_data.append([row[0], row[1]])
+
+    ranking = pd.DataFrame(ranking_data, columns=["Teacher", "Coins"])
+    ranking.insert(0, "Rank", range(1, len(ranking) + 1))
+
+    return ranking
+
+
+def get_all_submissions_for_download():
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT id, teacher, student, class_name, problem, help_given,
+               status, feedback, warning, coin_change, created_at
+        FROM submissions
+        ORDER BY id DESC
+    """)
+
+    rows = cursor.fetchall()
+    connection.close()
+
+    download_data = []
+
+    for row in rows:
+        download_data.append({
+            "Submission ID": row[0],
+            "Teacher": row[1],
+            "Student": row[2],
+            "Class": row[3],
+            "Problem": row[4],
+            "Help Provided": row[5],
+            "Status": row[6],
+            "Feedback": row[7],
+            "Warning": row[8],
+            "Coins Changed": row[9],
+            "Date and Time": row[10]
+        })
+
+    return pd.DataFrame(download_data)
+
+
+def add_notification(teacher, message):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        INSERT INTO notifications (teacher, message, created_at)
+        VALUES (?, ?, ?)
+    """, (
+        teacher,
+        message,
+        datetime.now().strftime("%d-%m-%Y %I:%M %p")
+    ))
+
+    connection.commit()
+    connection.close()
+
+
+def get_notifications(teacher):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT id, message, created_at, is_read
+        FROM notifications
+        WHERE teacher = ?
+        ORDER BY id DESC
+    """, (teacher,))
+
+    notifications = cursor.fetchall()
+    connection.close()
+
+    return notifications
+
+
+def mark_notifications_read(teacher):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        UPDATE notifications
+        SET is_read = 1
+        WHERE teacher = ?
+    """, (teacher,))
+
+    connection.commit()
+    connection.close()
+
+
+def get_unread_notification_count(teacher):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM notifications
+        WHERE teacher = ? AND is_read = 0
+    """, (teacher,))
+
+    result = cursor.fetchone()
+    connection.close()
+
+    return result[0]
+
+
+def review_submission(
+    submission_id,
+    status,
+    feedback,
+    warning,
+    coin_change
+):
+    submission = get_submission_by_id(submission_id)
+
+    if submission is None:
+        st.error("Submission not found.")
+        return
+
+    teacher = submission[1]
+
+    update_submission(
+        submission_id,
+        status,
+        feedback,
+        warning,
+        coin_change
+    )
+
+    if coin_change != 0:
+        change_coins(teacher, coin_change)
+
+    if coin_change > 0:
+        message = f"You received {coin_change} coin(s). Feedback: {feedback}"
+    elif coin_change < 0:
+        message = f"{coin_change} coin(s) were deducted. Feedback: {feedback}"
+    else:
+        message = f"Your submission was reviewed. Feedback: {feedback}"
+
+    if warning:
+        message = message + f" Warning: {warning}"
+
+    add_notification(teacher, message)
+
+
+# ---------------- LOGIN PAGE ----------------
+if st.session_state.logged_in is None:
+    st.markdown('<div class="main-title">🏫 School Pulse 2.0</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Teacher Support, Proof Review and Reward System</div>', unsafe_allow_html=True)
+    st.markdown('<div class="motivation">Try, try, but don’t cry. 💪</div>', unsafe_allow_html=True)
+
+    login_type = st.radio(
+        "Choose login type:",
+        ["Teacher", "Director", "Admin"]
+    )
+
+    if login_type == "Teacher":
+        teacher = st.selectbox("Select your name", teachers)
+        password = st.text_input("Password", type="password")
+
+        if st.button("Teacher Login"):
+            if password == teacher_passwords[teacher]:
+                st.session_state.logged_in = teacher
+                st.session_state.role = "teacher"
+                st.rerun()
+            else:
+                st.error("Wrong password. Please try again.")
+
+    elif login_type == "Director":
+        password = st.text_input("Director password", type="password")
+
+        if st.button("Director Login"):
+            if password == director_password:
+                st.session_state.logged_in = "Director"
+                st.session_state.role = "director"
+                st.rerun()
+            else:
+                st.error("Wrong director password.")
+
+    else:
+        admin_name = st.selectbox("Select admin", list(admins.keys()))
+        password = st.text_input("Admin password", type="password")
+
+        if st.button("Admin Login"):
+            if password == admins[admin_name]:
+                st.session_state.logged_in = admin_name
+                st.session_state.role = "admin"
+                st.rerun()
+            else:
+                st.error("Wrong admin password.")
+
+    st.stop()
+
+# ---------------- TEACHER SECTION ----------------
+if st.session_state.role == "teacher":
+    teacher = st.session_state.logged_in
+
+    st.title(f"Welcome, {teacher.title()} 👋")
+    st.markdown('<div class="motivation">Try, try, but don’t cry. 💪</div>', unsafe_allow_html=True)
+
+    unread_count = get_unread_notification_count(teacher)
+
+    if unread_count > 0:
+        st.markdown(
+            f'<div class="notification">🔔 You have {unread_count} new notification(s).</div>',
+            unsafe_allow_html=True
+        )
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Submit Student Problem",
+        "My Submissions, Feedbacks and Coins",
+        "Notifications",
+        "Teacher Ranking"
+    ])
+
+    with tab1:
+        st.subheader("Submit a student problem")
+
+        student = st.text_input("Student name")
+        class_name = st.text_input("Class / Section")
+        problem = st.text_area("What problem did the student face?")
+        help_given = st.text_area("What help did you provide?")
+
+        photo = st.file_uploader(
+            "Upload photo proof (must be under 100 MB)",
+            type=["jpg", "jpeg", "png", "webp"]
+        )
+
+        if photo is not None:
+            photo_size_mb = photo.size / (1024 * 1024)
+
+            if photo_size_mb >= 100:
+                st.error("Photo is too large. Please upload a photo under 100 MB.")
+                photo = None
+            else:
+                st.success(f"Photo accepted: {photo_size_mb:.1f} MB")
+
+        if st.button("Submit"):
+            if student and problem and help_given and photo is not None:
+                photo_bytes = photo.getvalue()
+
+                add_submission(
+                    teacher,
+                    student,
+                    class_name,
+                    problem,
+                    help_given,
+                    photo_bytes
+                )
+
+                st.success("Your submission was saved successfully.")
+                st.rerun()
+            else:
+                st.warning("Please fill all details and upload a photo under 100 MB.")
+
+    with tab2:
+        st.subheader("My coins")
+
+        my_coins = get_teacher_coins(teacher)
+        st.metric("Total coins", my_coins)
+
+        st.subheader("My submissions")
+
+        my_submissions = get_teacher_submissions(teacher)
+
+        if len(my_submissions) == 0:
+            st.info("You have not submitted any student problem yet.")
+        else:
+            for submission in my_submissions:
+                submission_id = submission[0]
+                student = submission[1]
+                class_name = submission[2]
+                problem = submission[3]
+                help_given = submission[4]
+                photo_bytes = submission[5]
+                status = submission[6]
+                feedback = submission[7]
+                warning = submission[8]
+                coin_change = submission[9]
+                created_at = submission[10]
+
+                with st.expander(
+                    f"#{submission_id} - {student} - {status}"
+                ):
+                    st.write(f"**Class:** {class_name}")
+                    st.write(f"**Problem:** {problem}")
+                    st.write(f"**Help provided:** {help_given}")
+                    st.write(f"**Submitted on:** {created_at}")
+
+                    if photo_bytes:
+                        st.image(
+                            io.BytesIO(photo_bytes),
+                            caption="Photo proof",
+                            width="stretch"
+                        )
+
+                    st.write(f"**Status:** {status}")
+
+                    if feedback:
+                        st.write(f"**Feedback:** {feedback}")
+
+                    if warning:
+                        st.write(f"**Warning:** {warning}")
+
+                    if coin_change != 0:
+                        st.write(f"**Coins changed:** {coin_change}")
+
+    with tab3:
+        st.subheader("My notifications")
+
+        notifications = get_notifications(teacher)
+
+        if len(notifications) == 0:
+            st.info("You have no notifications yet.")
+        else:
+            for notification in notifications:
+                notification_id = notification[0]
+                message = notification[1]
+                created_at = notification[2]
+                is_read = notification[3]
+
+                if is_read == 0:
+                    st.markdown(
+                        f'<div class="notification"><b>{created_at}</b><br>{message}</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.write(f"**{created_at}** — {message}")
+
+        if st.button("Mark all notifications as read"):
+            mark_notifications_read(teacher)
+            st.rerun()
+
+    with tab4:
+        st.subheader("Teacher ranking")
+
+        ranking = get_leaderboard()
+
+        for index, row in ranking.iterrows():
+            if row["Teacher"] == teacher:
+                st.markdown(
+                    f'<div class="rank-me">Rank {row["Rank"]} — {row["Teacher"].title()} — {row["Coins"]} coins</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.write(
+                    f"Rank {row['Rank']} — {row['Teacher'].title()} — {row['Coins']} coins"
+                )
+
+    if st.button("Logout"):
+        st.session_state.logged_in = None
+        st.session_state.role = None
+        st.rerun()
+
+# ---------------- DIRECTOR SECTION ----------------
+elif st.session_state.role == "director":
+    st.title("Welcome, Director 👑")
+    st.markdown("You can review teacher help photos, give feedback, award coins, and download reports.")
+
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM submissions")
+    total_problems = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM submissions WHERE status = 'Approved'")
+    solved_problems = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM submissions WHERE status = 'Pending'")
+    pending_problems = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM submissions WHERE status = 'Rejected'")
+    rejected_problems = cursor.fetchone()[0]
+
+    connection.close()
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Total problems", total_problems)
+    col2.metric("Solved problems", solved_problems)
+    col3.metric("Pending problems", pending_problems)
+
+    st.subheader("Problem graph")
+
+    if total_problems == 0:
+        st.info("No teacher submissions yet.")
+    else:
+        graph_data = pd.DataFrame({
+            "Status": ["Solved", "Pending", "Rejected"],
+            "Count": [
+                solved_problems,
+                pending_problems,
+                rejected_problems
+            ]
+        })
+
+        st.bar_chart(graph_data.set_index("Status"))
+
+    st.subheader("Teacher proofs and feedback")
+
+    pending_submissions = get_pending_submissions()
+
+    if len(pending_submissions) == 0:
+        st.info("No pending teacher submissions.")
+    else:
+        for submission in pending_submissions:
+            submission_id = submission[0]
+            submission_teacher = submission[1]
+            student = submission[2]
+            class_name = submission[3]
+            problem = submission[4]
+            help_given = submission[5]
+            photo_bytes = submission[6]
+            created_at = submission[7]
+
+            with st.expander(
+                f"#{submission_id} - {submission_teacher.title()} - {student}"
+            ):
+                st.write(f"**Class:** {class_name}")
+                st.write(f"**Problem:** {problem}")
+                st.write(f"**Help provided:** {help_given}")
+                st.write(f"**Submitted on:** {created_at}")
+
+                if photo_bytes:
+                    st.image(
+                        io.BytesIO(photo_bytes),
+                        caption="Photo proof",
+                        width="stretch"
+                    )
+
+                feedback = st.text_input(
+                    "Write feedback",
+                    key=f"director_feedback_{submission_id}"
+                )
+
+                coin_choice = st.selectbox(
+                    "Choose coin change",
+                    [
+                        "+1 coin",
+                        "+2 coins",
+                        "+5 coins",
+                        "+10 coins",
+                        "-1 coin",
+                        "-2 coins",
+                        "-5 coins",
+                        "-10 coins",
+                        "No coin change"
+                    ],
+                    key=f"director_coin_{submission_id}"
+                )
+
+                if coin_choice == "+1 coin":
+                    coin_change = 1
+                    final_status = "Approved"
+                elif coin_choice == "+2 coins":
+                    coin_change = 2
+                    final_status = "Approved"
+                elif coin_choice == "+5 coins":
+                    coin_change = 5
+                    final_status = "Approved"
+                elif coin_choice == "+10 coins":
+                    coin_change = 10
+                    final_status = "Approved"
+                elif coin_choice == "-1 coin":
+                    coin_change = -1
+                    final_status = "Rejected"
+                elif coin_choice == "-2 coins":
+                    coin_change = -2
+                    final_status = "Rejected"
+                elif coin_choice == "-5 coins":
+                    coin_change = -5
+                    final_status = "Rejected"
+                elif coin_choice == "-10 coins":
+                    coin_change = -10
+                    final_status = "Rejected"
+                else:
+                    coin_change = 0
+                    final_status = "Approved"
+
+                if st.button(
+                    "Save review",
+                    key=f"director_save_{submission_id}"
+                ):
+                    review_submission(
+                        submission_id,
+                        final_status,
+                        feedback,
+                        "",
+                        coin_change
+                    )
+
+                    st.success("Review saved and notification sent.")
+                    st.rerun()
+
+    st.subheader("Teacher leaderboard")
+
+    leaderboard = get_leaderboard()
+    st.dataframe(leaderboard, width="stretch")
+
+    st.subheader("Download report")
+
+    report = get_all_submissions_for_download()
+
+    if len(report) == 0:
+        st.info("No submissions available to download yet.")
+    else:
+        csv_data = report.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            label="Download all submissions as CSV",
+            data=csv_data,
+            file_name="school_pulse_submissions.csv",
+            mime="text/csv"
+        )
+
+    if st.button("Logout"):
+        st.session_state.logged_in = None
+        st.session_state.role = None
+        st.rerun()
+
+# ---------------- ADMIN SECTION ----------------
+elif st.session_state.role == "admin":
+    st.title(f"Welcome, {st.session_state.logged_in} 👩‍🏫")
+    st.markdown("Admins can view submissions, give warnings, award coins, and download reports.")
+
+    pending_submissions = get_pending_submissions()
+
+    if len(pending_submissions) == 0:
+        st.info("No teacher submissions yet.")
+    else:
+        for submission in pending_submissions:
+            submission_id = submission[0]
+            submission_teacher = submission[1]
+            student = submission[2]
+            class_name = submission[3]
+            problem = submission[4]
+            help_given = submission[5]
+            photo_bytes = submission[6]
+            created_at = submission[7]
+
+            with st.expander(
+                f"#{submission_id} - {submission_teacher.title()} - {student}"
+            ):
+                st.write(f"**Class:** {class_name}")
+                st.write(f"**Problem:** {problem}")
+                st.write(f"**Help provided:** {help_given}")
+                st.write(f"**Submitted on:** {created_at}")
+
+                if photo_bytes:
+                    st.image(
+                        io.BytesIO(photo_bytes),
+                        caption="Photo proof",
+                        width="stretch"
+                    )
+
+                warning = st.text_input(
+                    "Give a warning / feedback",
+                    key=f"admin_warning_{submission_id}"
+                )
+
+                coin_choice = st.selectbox(
+                    "Choose coin change",
+                    [
+                        "+1 coin",
+                        "+2 coins",
+                        "+5 coins",
+                        "+10 coins",
+                        "-1 coin",
+                        "-2 coins",
+                        "-5 coins",
+                        "-10 coins",
+                        "No coin change"
+                    ],
+                    key=f"admin_coin_{submission_id}"
+                )
+
+                if coin_choice == "+1 coin":
+                    coin_change = 1
+                    final_status = "Approved"
+                elif coin_choice == "+2 coins":
+                    coin_change = 2
+                    final_status = "Approved"
+                elif coin_choice == "+5 coins":
+                    coin_change = 5
+                    final_status = "Approved"
+                elif coin_choice == "+10 coins":
+                    coin_change = 10
+                    final_status = "Approved"
+                elif coin_choice == "-1 coin":
+                    coin_change = -1
+                    final_status = "Rejected"
+                elif coin_choice == "-2 coins":
+                    coin_change = -2
+                    final_status = "Rejected"
+                elif coin_choice == "-5 coins":
+                    coin_change = -5
+                    final_status = "Rejected"
+                elif coin_choice == "-10 coins":
+                    coin_change = -10
+                    final_status = "Rejected"
+                else:
+                    coin_change = 0
+                    final_status = "Approved"
+
+                if st.button(
+                    "Save review",
+                    key=f"admin_save_{submission_id}"
+                ):
+                    review_submission(
+                        submission_id,
+                        final_status,
+                        warning,
+                        warning,
+                        coin_change
+                    )
+
+                    st.success("Review saved and notification sent.")
+                    st.rerun()
